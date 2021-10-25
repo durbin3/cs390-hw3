@@ -19,7 +19,7 @@ tf.random.set_seed(1618)
 
 #tf.logging.set_verbosity(tf.logging.ERROR)   # Uncomment for TF1.
 os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-
+tf.compat.v1.disable_eager_execution()
 CONTENT_IMG_PATH = "./content_img.jpg"
 STYLE_IMG_PATH = "./style_img.jpg"
 
@@ -30,8 +30,8 @@ CONTENT_IMG_W = 500
 STYLE_IMG_H = 500
 STYLE_IMG_W = 500
 
-CONTENT_WEIGHT = 0.1    # Alpha weight.
-STYLE_WEIGHT = 1.0      # Beta weight.
+CONTENT_WEIGHT = .0001    # Alpha weight.
+STYLE_WEIGHT = 1      # Beta weight.
 TOTAL_WEIGHT = 1.0
 
 TRANSFER_ROUNDS = 3
@@ -40,14 +40,15 @@ TRANSFER_ROUNDS = 3
 
 #=============================<Helper Fuctions>=================================
 '''
-TODO: implement this.
 This function should take the tensor and re-convert it to an image.
 '''
 def deprocessImage(img):
-    img = img*255
-    img = np.array(img,dtype=np.uint8)
-    if (np.ndim(img)>3):
-        img = img[0]
+    img = img.reshape(CONTENT_IMG_H,CONTENT_IMG_W,3)
+    img[:, :, 0] += 103.939
+    img[:, :, 1] += 116.779
+    img[:, :, 2] += 123.68
+    img = img[:, :, ::-1]
+    img = np.clip(img, 0, 255).astype('uint8')
     return Image.fromarray(img)
 
 
@@ -61,22 +62,16 @@ def gramMatrix(x):
 #========================<Loss Function Builder Functions>======================
 
 def styleLoss(style, gen):
-    numFilters = 4
-    num = K.sum(K.square(gramMatrix(style)-gramMatrix(gen)))
+    numFilters = 3
+    gram_s = gramMatrix(style)
+    gram_g = gramMatrix(gen)
+    num = K.sum(K.square(gram_s-gram_g))
     den = (4*(numFilters**2)*(STYLE_IMG_H*STYLE_IMG_W)**2)
     return num/den
 
 
-
 def contentLoss(content, gen):
     return K.sum(K.square(gen - content))
-
-
-def totalLoss(x):
-    return None   #TODO: implement.
-
-
-
 
 
 #=========================<Pipeline Functions>==================================
@@ -107,7 +102,6 @@ def preprocessData(raw):
 
 
 '''
-TODO: Allot of stuff needs to be implemented in this function.
 First, make sure the model is set up properly.
 Then construct the loss function (from content and style loss).
 Gradient functions will also need to be created, or you can use K.Gradients().
@@ -116,13 +110,13 @@ Save the newly generated and deprocessed images.
 '''
 def styleTransfer(cData, sData, tData):
     print("   Building transfer model.")
+    tData = tData.flatten()
     contentTensor = K.variable(cData)
     styleTensor = K.variable(sData)
     genTensor = K.placeholder((1, CONTENT_IMG_H, CONTENT_IMG_W, 3))
     inputTensor = K.concatenate([contentTensor, styleTensor, genTensor], axis=0)
     model = vgg19.VGG19(include_top=False,weights='imagenet',input_tensor=inputTensor)
     outputDict = dict([(layer.name, layer.output) for layer in model.layers])
-    weightsDict = dict([(layer.name,layer.weights) for layer in model.layers])
     print("   VGG19 model loaded.")
     styleLayerNames = ["block1_conv1", "block2_conv1", "block3_conv1", "block4_conv1", "block5_conv1"]
     contentLayerName = "block5_conv2"
@@ -137,26 +131,36 @@ def styleTransfer(cData, sData, tData):
     style_loss = 0
     for layerName in styleLayerNames:
         styleLayer = outputDict[layerName]
-        styleOutput = styleLayer[0,:,:,:]
+        styleOutput = styleLayer[1,:,:,:]
         genOutput = styleLayer[2,:,:,:]
-        l_w = weightsDict[layerName][1]
+        l_w = STYLE_WEIGHT/len(styleLayerNames)
         style_loss += l_w * styleLoss(styleOutput,genOutput)
-    loss = CONTENT_WEIGHT*content_loss + STYLE_WEIGHT*style_loss   #TODO: implement.
-    grad = K.gradients(loss,model.input)[0]
+    loss = CONTENT_WEIGHT*content_loss + STYLE_WEIGHT*style_loss 
+    grad = K.gradients(loss,genTensor)[0]
+    
     outputs = [loss]
     outputs.append(grad)
     kFunction = K.function([genTensor],outputs)
     print("   Beginning transfer.")
+    def loss_f(x):
+        x = x.reshape((1, CONTENT_IMG_H,CONTENT_IMG_W, 3))
+        outs = kFunction([x])
+        loss_value = outs[0]
+        return loss_value
+    
+    def grads_f(x):
+        x = x.reshape((1, CONTENT_IMG_H,CONTENT_IMG_W, 3))
+        outs = kFunction([x])
+        grad_values = outs[1].flatten().astype('float64')
+        return grad_values
     for i in range(TRANSFER_ROUNDS):
         print("   Step %d." % i)
-        #TODO: perform gradient descent using fmin_l_bfgs_b.
-        x = fmin_l_bfgs_b(kFunction,x,fprime=grad)
-        tLoss = totalLoss(x)
+        x,tLoss,info = fmin_l_bfgs_b(loss_f,tData,grads_f,maxiter=200)
         print("      Loss: %f." % tLoss)
         img = deprocessImage(x)
-        saveFile = img.save("output.png")   #TODO: Implement.
-        #imsave(saveFile, img)   #Uncomment when everything is working right.
-        print("      Image saved to \"%s\"." % saveFile)
+        path = "output"+str(i)+".png"
+        img.save(path)
+        print("      Image saved to \"%s\"." % path)
     print("   Transfer complete.")
 
 
